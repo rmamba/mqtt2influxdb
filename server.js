@@ -65,7 +65,7 @@ const run = async () => {
     if (fs.existsSync('./fieldMap.json')) {
         fieldMap = require('./fieldMap.json');
     }
-    const fieldMapFile = '/mqtt2influx/fieldMap.json';
+    const fieldMapFile = '/mqtt2influxdb/fieldMap.json';
     if (fs.existsSync(fieldMapFile)) {
         fieldMap = require(fieldMapFile);
     }
