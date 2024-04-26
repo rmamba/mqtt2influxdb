@@ -1,7 +1,6 @@
 # WHAT is mqtt2influxdb?
 
-This container will update Redis values everytime MQTT data changes.
-Container includes openvpn client connection so either Redis, MQTT or both can be kept in a secure environment.
+This container will push data to InfluxDB everytime MQTT data changes.
 
 # MQTT Configuration
 
