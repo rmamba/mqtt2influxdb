@@ -8,7 +8,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const DEBUG = (process.env.DEBUG || 'false') === 'true';
 const WEBUI_PORT = parseInt(process.env.WEBUI_PORT || '38901');
-const MQTT_CLIENT_ID = process.env.MQTT_CLIENT_ID || 'wizLights';
+const MQTT_CLIENT_ID = process.env.MQTT_CLIENT_ID || 'mqtt2influxdb';
 const MQTT_SERVER = process.env.MQTT_SERVER || '127.0.0.1';
 const MQTT_PORT = process.env.MQTT_PORT || '1883';
 const MQTT_SUB = process.env.MQTT_SUB || 'mqtt2redis/#';
@@ -17,13 +17,76 @@ const INFLUXDB_API_TOKEN = process.env.INFLUXDB_API_TOKEN;
 const INFLUXDB_ORG = process.env.INFLUXDB_ORG;
 const INFLUXDB_BUCKET = process.env.INFLUXDB_BUCKET;
 const INFLUXDB_DEFAULT_TAGS = process.env.INFLUXDB_DEFAULT_TAGS || 'clientId:mqtt2influxdb';
-const MQTT_INFLUXDB_MAP_FILE_URL = process.env.MQTT_INFLUXDB_MAP_FILE_URL;
+const MQTT_INFLUXDB_FIELD_MAP_FILE_URL = process.env.MQTT_INFLUXDB_FIELD_MAP_FILE_URL;
+const MQTT_INFLUXDB_VALUES_MAP_FILE_URL = process.env.MQTT_INFLUXDB_VALUES_MAP_FILE_URL;
+const FIELD_MAP_FILE = process.env.FIELD_MAP_FILE || 'fieldMap.json';
+const VALUES_MAP_FILE = process.env.VALUES_MAP_FILE || 'valuesMap.json';
+const ONLY_MATCH_SUFFIXES = (process.env.ONLY_MATCH_SUFFIXES || 'false') === 'true';
 
 let mqttClient;
 let influxClient;
 let fieldMap = {};
+let valuesMap = {};
 const cache = {};
 const reported = [];
+
+const collectPoint = (topic, data) => {
+    if (ONLY_MATCH_SUFFIXES) {
+        const field = Object.keys(fieldMap).find(k => topic.endsWith(k));
+        if (!field) {
+            return;
+        }
+        const measurementName  = fieldMap[field];
+        let value = valuesMap[`${field}:${data}`] ?? data;
+        if (typeof data === 'string' && !isNaN(data)) {
+            value = parseFloat(data);
+        }
+        const pnt = new influx.Point(measurementName)
+            .tag('topic', topic)
+            .floatField('value', value);
+        influxClient.writePoint(pnt);
+    } else {
+        const measurementName  = fieldMap[topic];
+        if (!measurementName) {
+            if (!reported.includes(topic)) {
+                console.log(`Ignorred topic ${topic}!`);
+                reported.push(topic);
+            }
+            return;
+        }
+
+        let value = data;
+        if (typeof data === 'string' && !isNaN(data)) {
+            value = parseFloat(data);
+        }
+        const pnt = new influx.Point(measurementName)
+            .tag('topic', topic)
+            .floatField('value', value);
+        influxClient.writePoint(pnt);
+    }
+}
+
+const flatJSON = (jsonData, path) => {
+    let res = {};
+
+    Object.keys(jsonData).forEach(k => {
+        const x = jsonData[k];
+        let p = k;
+        if (path !== '') {
+            p = `${path}/${k}`;
+        }
+        if (typeof x === 'object' && !Array.isArray(x) && x !== null) {
+            res = {
+                ...res,
+                ...flatJSON(x, k),
+            }
+        } else {
+            res[p] = x;
+        }
+    });
+    
+    return res;
+}
 
 const updateCache = (path, data) => {
     const d = path.split('/');
@@ -62,19 +125,37 @@ const run = async () => {
         reconnectPeriod: 500,
     };
 
-    if (fs.existsSync('./fieldMap.json')) {
-        fieldMap = require('./fieldMap.json');
+    // Load fieldsMap.json data
+    if (fs.existsSync(`./${FIELD_MAP_FILE}`)) {
+        fieldMap = require(`./${FIELD_MAP_FILE}`);
     }
-    const fieldMapFile = '/mqtt2influxdb/fieldMap.json';
+    const fieldMapFile = `/mqtt2influxdb/${FIELD_MAP_FILE}`;
     if (fs.existsSync(fieldMapFile)) {
         fieldMap = require(fieldMapFile);
     }
-    if (MQTT_INFLUXDB_MAP_FILE_URL) {
-        loadJsonFileFromUrl(MQTT_INFLUXDB_MAP_FILE_URL).then((jsonData) => {
-            console.log(`Loaded data from ${MQTT_INFLUXDB_MAP_FILE_URL}`);
+    if (MQTT_INFLUXDB_FIELD_MAP_FILE_URL) {
+        loadJsonFileFromUrl(MQTT_INFLUXDB_FIELD_MAP_FILE_URL).then((jsonData) => {
+            console.log(`Loaded data from ${MQTT_INFLUXDB_FIELD_MAP_FILE_URL}`);
             fieldMap = jsonData;
         }).catch((error) => {
-            console.error(`Error loading data from ${MQTT_INFLUXDB_MAP_FILE_URL}: `, error);
+            console.error(`Error loading data from ${MQTT_INFLUXDB_FIELD_MAP_FILE_URL}: `, error);
+        });
+    }
+
+    // Load valuesMap.json data
+    if (fs.existsSync(`./${VALUES_MAP_FILE}`)) {
+        valuesMap = require(`./${VALUES_MAP_FILE}`);
+    }
+    const valuesMapFile = `/mqtt2influxdb/${VALUES_MAP_FILE}`;
+    if (fs.existsSync(valuesMapFile)) {
+        valuesMap = require(valuesMapFile);
+    }
+    if (MQTT_INFLUXDB_VALUES_MAP_FILE_URL) {
+        loadJsonFileFromUrl(MQTT_INFLUXDB_VALUES_MAP_FILE_URL).then((jsonData) => {
+            console.log(`Loaded data from ${MQTT_INFLUXDB_VALUES_MAP_FILE_URL}`);
+            valuesMap = jsonData;
+        }).catch((error) => {
+            console.error(`Error loading data from ${MQTT_INFLUXDB_VALUES_MAP_FILE_URL}: `, error);
         });
     }
 
@@ -117,22 +198,18 @@ const run = async () => {
 
     mqttClient.on('message', (topic, payload) => {
         const data = payload.toString();
-        updateCache(topic, data);
 
-        const measurementName  = fieldMap[topic];
-        if (!measurementName) {
-            if (!reported.includes(topic)) {
-                console.log(`Unknown topic ${topic}!`);
-                reported.push(topic);
-            }
-            return;
+        // ToDO: if data is JSON object like for Tasmota data
+        if (data.startsWith('{') && data.endsWith('}')) {
+            const jsonData = flatJSON(JSON.parse(data), '');
+            Object.keys(jsonData).forEach(k => {
+                updateCache(`${topic}/${k}`, jsonData[k]);
+                collectPoint(`${topic}/${k}`, jsonData[k]);
+            });
+        } else {
+            updateCache(topic, data);
+            collectPoint(topic, data);
         }
-
-        let value = parseFloat(data);
-        const pnt = new influx.Point(measurementName)
-            .tag('topic', topic)
-            .floatField('value', value);
-        influxClient.writePoint(pnt);
     });
     
     while (!mqttClient.connected) {
@@ -190,7 +267,28 @@ const run = async () => {
         fieldMap = req.body;
         fs.writeFile(fieldMapFile, JSON.stringify(fieldMap), err => {
             if (err) {
-                console.error('Error saving fieldMap.json file: ', err);
+                console.error(`Error saving ${FIELD_MAP_FILE} file: `, err);
+                res.status(500);
+                res.end();
+            } else {
+                res.status(200);
+                res.end();
+            }
+        });
+    });
+
+    app.get('/valuesMap.json', function (req, res) {
+        res.setHeader("Content-Type", "application/json");
+        res.status(200);
+        res.json(valuesMap);
+    });
+
+    app.post('/valuesMap.json', function (req, res) {
+        // Update valuesMap
+        valuesMap = req.body;
+        fs.writeFile(valuesMapFile, JSON.stringify(valuesMap), err => {
+            if (err) {
+                console.error(`Error saving ${VALUES_MAP_FILE} file: `, err);
                 res.status(500);
                 res.end();
             } else {

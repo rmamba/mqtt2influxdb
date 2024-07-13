@@ -132,4 +132,4 @@ dist
 # launch.json
 launch.json
 __*
-fieldMap.json
+*Map*.json
