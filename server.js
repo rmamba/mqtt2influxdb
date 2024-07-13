@@ -45,28 +45,29 @@ const collectPoint = (topic, data) => {
             .tag('topic', topic)
             .floatField('value', value);
         influxClient.writePoint(pnt);
-    } else {
-        const measurementName  = fieldMap[topic];
-        if (!measurementName) {
-            if (!reported.includes(topic)) {
-                console.log(`Ignorred topic ${topic}!`);
-                reported.push(topic);
-            }
-            return;
-        }
-
-        let value = data;
-        if (typeof data === 'string' && !isNaN(data)) {
-            value = parseFloat(data);
-        }
-        const pnt = new influx.Point(measurementName)
-            .tag('topic', topic)
-            .floatField('value', value);
-        influxClient.writePoint(pnt);
+        return;
     }
+
+    const measurementName  = fieldMap[topic];
+    if (!measurementName) {
+        if (!reported.includes(topic)) {
+            console.log(`Ignorred topic ${topic}!`);
+            reported.push(topic);
+        }
+        return;
+    }
+
+    let value = data;
+    if (typeof data === 'string' && !isNaN(data)) {
+        value = parseFloat(data);
+    }
+    const pnt = new influx.Point(measurementName)
+        .tag('topic', topic)
+        .floatField('value', value);
+    influxClient.writePoint(pnt);
 }
 
-const flatJSON = (jsonData, path) => {
+const flattenJSON = (jsonData, path) => {
     let res = {};
 
     Object.keys(jsonData).forEach(k => {
@@ -78,7 +79,7 @@ const flatJSON = (jsonData, path) => {
         if (typeof x === 'object' && !Array.isArray(x) && x !== null) {
             res = {
                 ...res,
-                ...flatJSON(x, k),
+                ...flattenJSON(x, k),
             }
         } else {
             res[p] = x;
@@ -198,10 +199,8 @@ const run = async () => {
 
     mqttClient.on('message', (topic, payload) => {
         const data = payload.toString();
-
-        // ToDO: if data is JSON object like for Tasmota data
         if (data.startsWith('{') && data.endsWith('}')) {
-            const jsonData = flatJSON(JSON.parse(data), '');
+            const jsonData = flattenJSON(JSON.parse(data), '');
             Object.keys(jsonData).forEach(k => {
                 updateCache(`${topic}/${k}`, jsonData[k]);
                 collectPoint(`${topic}/${k}`, jsonData[k]);
